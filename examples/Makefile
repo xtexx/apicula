@@ -319,6 +319,10 @@ bsram-%-tangnano1k-synth.json: pll/GW1NZ-1-dyn.vh %-image-rom.v %-video-ram.v %.
 %-tangnano4k.fs: %-tangnano4k.json
 	gowin_pack -c -d GW1NS-4 --mspi_as_gpio -o $@ $^
 
+# XXX fix compression with emcu
+emcu-%-tangnano4k.fs: emcu-%-tangnano4k.json
+	gowin_pack -d GW1NS-4 --mspi_as_gpio -o $@ $^
+
 %-tangnano4k.json: %-tangnano4k-synth.json tangnano4k.cst
 	$(NEXTPNR) --json $< --write $@ --device GW1NSR-LV4CQN48PC7/I6 --vopt cst=tangnano4k.cst
 
@@ -415,7 +419,7 @@ blinky-pll-runber-synth.json: pll/GW1N-4-dyn.vh blinky-pll.v
 	$(YOSYS) -D INV_BTN=0 -D LEDS_NR=8 -p "read_verilog $^; synth_gowin -json $@"
 
 # ============================================================
-#  Upack
+#  Unpack
 %-tangnano-unpacked.v: %-tangnano.fs
 	gowin_unpack -d GW1N-1 -o $@ $^
 

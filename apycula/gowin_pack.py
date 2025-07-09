@@ -288,8 +288,9 @@ def isolate_segments(pnr, db, tilemap):
                 tile = tilemap[(row, col)]
                 if wire not in tiledata.alonenode_6:
                     raise Exception(f"Wire {wire} is not in alonenode fuse table")
-                bits = tiledata.alonenode_6[wire][1]
-                #print(wire_ex, bits)
+                if len(tiledata.alonenode_6[wire]) != 1:
+                    raise Exception(f"Incorrect alonenode fuse table for {wire}")
+                bits = tiledata.alonenode_6[wire][0][1]
                 for row, col in bits:
                     tile[row][col] = 1
             else:
@@ -2697,6 +2698,7 @@ def place(db, tilemap, bels, cst, args):
 
     # second IO pass
     for bank, ios in _io_bels.items():
+        in_bank_attrs = {}
         # check IO standard
         vccio = None
         iostd = None
@@ -2711,6 +2713,9 @@ def place(db, tilemap, bels, cst, args):
                 if iob.attrs.get('SINGLERESISTOR', 'OFF') != 'OFF':
                     iob.attrs['DDR_DYNTERM'] = 'ON'
             if iob.flags['mode'] in {'OBUF', 'IOBUF', 'TLVDS_OBUF', 'TLVDS_IOBUF', 'TLVDS_TBUF', 'TLVDS_TBUF', 'ELVDS_OBUF', 'ELVDS_IOBUF'}:
+                if iob.flags['mode'] in {'ELVDS_OBUF', 'ELVDS_IOBUF'}:
+                    in_bank_attrs['BANK_VCCIO'] = '1.2'
+
                 if 'BANK_VCCIO' in iob.attrs:
                     if iob.attrs['BANK_VCCIO'] != _vcc_ios[iob.attrs['IO_TYPE']]:
                         raise Exception(f"Conflict bank VCC at {iob_name}.")
@@ -2727,8 +2732,8 @@ def place(db, tilemap, bels, cst, args):
         if not vccio:
             iostd = 'LVCMOS12'
 
-        in_bank_attrs = {}
-        in_bank_attrs['BANK_VCCIO'] = _vcc_ios[iostd]
+        if 'BANK_VCCIO' not in in_bank_attrs:
+            in_bank_attrs['BANK_VCCIO'] = _vcc_ios[iostd]
 
         # set io bits
         for name, iob in ios.items():
@@ -2767,10 +2772,10 @@ def place(db, tilemap, bels, cst, args):
             # lvds
             if iob.flags['mode'] in {'TLVDS_OBUF', 'TLVDS_TBUF', 'TLVDS_IOBUF'}:
                 in_iob_attrs.update({'LVDS_OUT': 'ON', 'ODMUX_1': 'UNKNOWN', 'ODMUX': 'TRIMUX',
-                    'SLEWRATE': 'FAST', 'PERSISTENT': 'OFF'})
+                                     'SLEWRATE': 'FAST', 'PERSISTENT': 'OFF', 'DRIVE': '0', 'DIFFRESISTOR': 'OFF'})
             elif iob.flags['mode'] in {'ELVDS_OBUF', 'ELVDS_TBUF', 'ELVDS_IOBUF'}:
                 in_iob_attrs.update({'ODMUX_1': 'UNKNOWN', 'ODMUX': 'TRIMUX',
-                    'PERSISTENT': 'OFF'})
+                    'PERSISTENT': 'OFF', 'DIFFRESISTOR': 'OFF'})
                 in_iob_attrs['IO_TYPE'] = get_iostd_alias(in_iob_attrs['IO_TYPE'])
             if iob.flags['mode'] in {'TLVDS_IBUF', 'ELVDS_IBUF'}:
                 in_iob_attrs['ODMUX_1'] = 'UNKNOWN'
@@ -2835,7 +2840,7 @@ def place(db, tilemap, bels, cst, args):
                         if k == 'IO_TYPE' and k in in_bank_attrs and in_bank_attrs[k].startswith('LVDS'):
                             continue
                         in_bank_attrs[k] = val
-                #print(row, col, atr)
+                #print(f"io{idx}:({row}, {col}):{sorted(iob_attrs)}")
                 bits = get_longval_fuses(db, tiledata.ttyp, iob_attrs, f'IOB{iob_idx}')
                 tile = tilemap[(row, col)]
                 for row_, col_ in bits:
@@ -2852,8 +2857,10 @@ def place(db, tilemap, bels, cst, args):
             if k not in attrids.iob_attrids:
                 print(f'XXX BANK: add {k} key handle')
             else:
-                if k in {'BANK_VCCIO', 'IO_TYPE'}:
+                if k in {'BANK_VCCIO', 'IO_TYPE', 'LVDS_OUT', 'DRIVE'}:
                     add_attr_val(db, 'IOB', bank_attrs, attrids.iob_attrids[k], attrids.iob_attrvals[val])
+
+        #print(f"bank{int(bank)}:({brow}, {bcol}):{sorted(bank_attrs)}")
         bits = get_bank_fuses(db, tiledata.ttyp, bank_attrs, 'BANK', int(bank))
         btile = tilemap[(brow, bcol)]
         for row, col in bits:
@@ -2863,23 +2870,6 @@ def place(db, tilemap, bels, cst, args):
     #    for io, bl in v.items():
     #        print(k, io, vars(bl))
 
-# The vertical columns of long wires can receive a signal from either the upper
-# or the lower end of the column.
-# The default source is the top end of the column, but if optimum routing has
-# resulted in the bottom end of the column being used, the top end must be
-# electrically disconnected by setting special fuses.
-def secure_long_wires(db, tilemap, row, col, src, dest):
-    if device in {"GW1N-1"}:
-        # the column runs across the entire height of the chip from the first to the last row
-        check_row = db.rows
-        fuse_row = 0
-        if row == check_row and dest in {'LT02', 'LT13'}:
-            tiledata = db.grid[fuse_row][col - 1]
-            if dest in tiledata.alonenode_6:
-                tile = tilemap[(fuse_row, col - 1)]
-                _, bits = tiledata.alonenode_6[dest]
-                for row, col in bits:
-                    tile[row][col] = 1
 
 # hclk interbank requires to set some non-route fuses
 def do_hclk_banks(db, row, col, src, dest):
@@ -2906,6 +2896,12 @@ def route(db, tilemap, pips):
                 bits.update(do_hclk_banks(db, row - 1, col - 1, src, dest))
             else:
                 bits = tiledata.pips[dest][src]
+                # check if we have 'not conencted to' situation
+                if dest in tiledata.alonenode:
+                    for srcs_fuses in tiledata.alonenode[dest]:
+                        srcs, fuses = srcs_fuses
+                        if src not in srcs:
+                            bits |= fuses
         except KeyError:
             print(src, dest, "not found in tile", row, col)
             breakpoint()
@@ -2937,12 +2933,14 @@ def gsr(db, tilemap, args):
             add_attr_val(db, 'GSR', gsr_attrs, attrids.gsr_attrids[k], attrids.gsr_attrvals[val])
 
     cfg_attrs = set()
-    for k, val in {'GSR': 'USED', 'GOE': 'F1'}.items():
+    for k, val in {'GSR': 'USED', 'GOE': 'F0'}.items():
         if k not in attrids.cfg_attrids:
             print(f'XXX CFG GSR: add {k} key handle')
         else:
             add_attr_val(db, 'CFG', cfg_attrs, attrids.cfg_attrids[k], attrids.cfg_attrvals[val])
-    add_attr_val(db, 'CFG', cfg_attrs, attrids.cfg_attrids['GSR'], attrids.cfg_attrvals['F1'])
+    add_attr_val(db, 'CFG', cfg_attrs, attrids.cfg_attrids['GSR'], attrids.cfg_attrvals['F0'])
+    add_attr_val(db, 'CFG', cfg_attrs, attrids.cfg_attrids['DONE'], attrids.cfg_attrvals['F0'])
+    add_attr_val(db, 'CFG', cfg_attrs, attrids.cfg_attrids['GWD'], attrids.cfg_attrvals['F0'])
 
     # The configuration fuses are described in the ['shortval'][60] table, global set/reset is
     # described in the ['shortval'][20] table. Look for cells with type with these tables
